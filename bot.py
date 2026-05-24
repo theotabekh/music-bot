@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 load_dotenv()
-BOT_TOKEN = os.getenv("8839847109:AAHZpwWSaCl50IMmdVxZXiXIMaQk7V078pA")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
 
