@@ -1,10 +1,9 @@
 import os
 import asyncio
 import aiohttp
-from pathlib import Path
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
@@ -13,35 +12,67 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+CHANNELS = ["@eng_sara_yangiliklar"]
 
-async def search_and_download(query: str):
-    """Deezer dan to'liq musiqa URL topadi."""
-    # 1. Qidirish
-    search_url = "https://api.deezer.com/search"
-    params = {"q": query, "limit": 1}
-    
+
+async def check_subscription(user_id: int, bot) -> bool:
+    """Foydalanuvchi kanallarga obuna bo'lganmi tekshiradi."""
+    for channel in CHANNELS:
+        try:
+            member = await bot.get_chat_member(channel, user_id)
+            if member.status in ["left", "kicked", "banned"]:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def subscription_keyboard() -> InlineKeyboardMarkup:
+    """Obuna tugmalari."""
+    buttons = []
+    for channel in CHANNELS:
+        buttons.append([InlineKeyboardButton(f"📢 {channel}", url=f"https://t.me/{channel[1:]}")])
+    buttons.append([InlineKeyboardButton("✅ Obuna bo'ldim", callback_data="check_sub")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def check_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Obuna tekshirib, agar yo'q bo'lsa xabar yuboradi."""
+    user_id = update.effective_user.id
+    is_subscribed = await check_subscription(user_id, context.bot)
+
+    if not is_subscribed:
+        await update.message.reply_text(
+            "⚠️ *Botdan foydalanish uchun quyidagi kanalga obuna bo'ling:*\n\n"
+            "Obuna bo'lgandan so'ng ✅ *Obuna bo'ldim* tugmasini bosing.",
+            parse_mode="Markdown",
+            reply_markup=subscription_keyboard()
+        )
+        return False
+    return True
+
+
+async def search_deezer(query: str) -> list:
+    url = "https://api.deezer.com/search"
+    params = {"q": query, "limit": 5}
     async with aiohttp.ClientSession() as session:
-        async with session.get(search_url, params=params) as resp:
+        async with session.get(url, params=params) as resp:
             if resp.status != 200:
-                return None
+                return []
             data = await resp.json()
-            tracks = data.get("data", [])
-            if not tracks:
-                return None
-            
-            track = tracks[0]
-            return {
-                "title": track["title"],
-                "artist": track["artist"]["name"],
-                "preview_url": track.get("preview"),  # 30 soniya MP3
-                "cover": track["album"].get("cover_medium"),
-                "deezer_url": track.get("link", ""),
-                "duration": track.get("duration", 0),
-            }
+            results = []
+            for track in data.get("data", []):
+                results.append({
+                    "title": track["title"],
+                    "artist": track["artist"]["name"],
+                    "cover": track["album"].get("cover_medium"),
+                    "preview": track.get("preview"),
+                    "deezer_url": track.get("link", ""),
+                })
+            return results
 
 
 async def download_audio(url: str) -> bytes | None:
-    """Audio faylni yuklab oladi."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status == 200:
@@ -50,76 +81,120 @@ async def download_audio(url: str) -> bytes | None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_subscribed = await check_subscription(user.id, context.bot)
+
+    if not is_subscribed:
+        await update.message.reply_text(
+            f"👋 Salom, *{user.first_name}*!\n\n"
+            "🎵 *Musiqa Bot* ga xush kelibsiz!\n\n"
+            "⚠️ Botdan foydalanish uchun avval quyidagi kanalga obuna bo'ling:",
+            parse_mode="Markdown",
+            reply_markup=subscription_keyboard()
+        )
+        return
+
     await update.message.reply_text(
-        "🎵 *Musiqa Bot*\n\n"
-        "Qo'shiq nomi yozing — topib yuboraman!\n\n"
-        "_Masalan: Dua Lipa Levitating_",
+        f"👋 Salom, *{user.first_name}*!\n\n"
+        "🎵 *Musiqa Bot* ga xush kelibsiz!\n\n"
+        "Qo'shiq nomi yoki artist yozing — topib yuboraman!\n\n"
+        "_Masalan:_ `Dua Lipa Levitating`",
         parse_mode="Markdown"
     )
 
 
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Obuna bo'ldim tugmasi bosilganda."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    is_subscribed = await check_subscription(user_id, context.bot)
+
+    if is_subscribed:
+        await query.message.edit_text(
+            "✅ *Rahmat! Obuna bo'ldingiz!*\n\n"
+            "Endi qo'shiq nomi yozing — topib yuboraman 🎵",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.answer("❌ Hali obuna bo'lmadingiz! Iltimos, kanalga obuna bo'ling.", show_alert=True)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Obuna tekshirish
+    if not await check_and_notify(update, context):
+        return
+
     query = update.message.text.strip()
     if not query:
         return
 
     msg = await update.message.reply_text(f"🔍 Qidirilmoqda: *{query}*...", parse_mode="Markdown")
 
-    track = await search_and_download(query)
+    results = await search_deezer(query)
 
-    if not track:
-        await msg.edit_text("❌ Topilmadi. Boshqa nom bilan urinib ko'ring.")
+    if not results:
+        await msg.edit_text("❌ Hech narsa topilmadi. Boshqa so'z bilan urinib ko'ring.")
         return
 
-    title = track["title"]
-    artist = track["artist"]
-    preview_url = track["preview_url"]
-    cover = track["cover"]
+    await msg.edit_text(f"✅ *{len(results)} ta natija topildi!*", parse_mode="Markdown")
 
-    await msg.edit_text(f"✅ Topildi! ⬇️ Yuklanmoqda...")
+    for track in results[:3]:
+        title = track["title"]
+        artist = track["artist"]
+        preview = track["preview"]
+        cover = track["cover"]
+        deezer_url = track["deezer_url"]
 
-    # Muqova + ma'lumot
-    if cover:
-        await update.message.reply_photo(
-            photo=cover,
-            caption=f"🎵 *{title}*\n👤 _{artist}_",
-            parse_mode="Markdown"
-        )
+        buttons = [[InlineKeyboardButton("🎧 Deezer'da to'liq tinglash", url=deezer_url)]]
+        keyboard = InlineKeyboardMarkup(buttons)
+        caption = f"🎵 *{title}*\n👤 _{artist}_"
 
-    # Audio yuborish
-    if preview_url:
-        audio_data = await download_audio(preview_url)
-        if audio_data:
-            tmp = f"/tmp/{title[:20]}.mp3"
-            with open(tmp, "wb") as f:
-                f.write(audio_data)
-            with open(tmp, "rb") as f:
+        if cover:
+            await update.message.reply_photo(
+                photo=cover,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+
+        if preview:
+            audio_data = await download_audio(preview)
+            if audio_data:
                 await update.message.reply_audio(
-                    audio=f,
+                    audio=audio_data,
+                    filename=f"{artist} - {title}.mp3",
                     title=title,
                     performer=artist,
-                    caption=f"🎵 *{title}* — _{artist}_",
+                    caption="🎵 _(30 soniyalik namuna)_\n👆 To'liq versiya uchun yuqoridagi tugmani bosing",
                     parse_mode="Markdown"
                 )
-            Path(tmp).unlink(missing_ok=True)
-            await msg.delete()
-        else:
-            await msg.edit_text("❌ Yuklab bo'lmadi.")
-    else:
-        await msg.edit_text(
-            f"🎵 *{title}* — _{artist}_\n\n"
-            "⚠️ Bu qo'shiq uchun yuklab bo'lmadi, boshqasini qidiring.",
-            parse_mode="Markdown"
-        )
+
+        await asyncio.sleep(0.5)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_and_notify(update, context):
+        return
+
+    await update.message.reply_text(
+        "🎤 Ovozli xabar qabul qilindi!\n\n"
+        "Qo'shiq nomini *matn* ko'rinishida yuboring 👇",
+        parse_mode="Markdown"
+    )
 
 
 def main():
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN yo'q!")
+        raise ValueError("BOT_TOKEN topilmadi!")
 
+    from telegram.ext import CallbackQueryHandler
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="check_sub"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     print("🤖 Bot ishga tushdi!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
