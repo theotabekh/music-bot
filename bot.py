@@ -8,19 +8,55 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
+    filters, ContextTypes
 )
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8839847109:AAHZpwWSaCl50IMmdVxZXiXIMaQk7V078pA")
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
 
-async def search_music_by_text(query: str) -> list[dict]:
-    """Deezer API orqali musiqa qidiradi (bepul, API key shart emas)."""
+async def download_from_youtube(query: str) -> tuple:
+    import yt_dlp
+    output_path = f"/tmp/{query[:30].replace(' ', '_')}.mp3"
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_path.replace(".mp3", ".%(ext)s"),
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+
+    loop = asyncio.get_event_loop()
+
+    def _download():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=True)
+            if "entries" in info:
+                info = info["entries"][0]
+            title = info.get("title", query)
+            artist = info.get("uploader", "Noma'lum")
+            return title, artist
+
+    try:
+        title, artist = await loop.run_in_executor(None, _download)
+        if Path(output_path).exists():
+            return output_path, title, artist
+        return None, query, "Noma'lum"
+    except Exception as e:
+        print(f"Xato: {e}")
+        return None, query, "Noma'lum"
+
+
+async def search_music_deezer(query: str) -> list:
     url = "https://api.deezer.com/search"
-    params = {"q": query, "limit": 5}
+    params = {"q": query, "limit": 3}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
             if resp.status != 200:
@@ -31,18 +67,15 @@ async def search_music_by_text(query: str) -> list[dict]:
                 results.append({
                     "title": track["title"],
                     "artist": track["artist"]["name"],
-                    "preview_url": track.get("preview"),   # 30 soniyalik mp3
                     "cover": track["album"].get("cover_medium"),
                     "deezer_url": track.get("link", ""),
                 })
             return results
 
 
-async def recognize_audio_shazam(file_path: str) -> dict | None:
-    """ShazamCore RapidAPI orqali ovozli xabarni aniqlaydi."""
+async def recognize_audio_shazam(file_path: str):
     if not RAPIDAPI_KEY:
         return None
-
     url = "https://shazam-core.p.rapidapi.com/v1/tracks/recognize"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
@@ -50,7 +83,6 @@ async def recognize_audio_shazam(file_path: str) -> dict | None:
     }
     async with aiofiles.open(file_path, "rb") as f:
         audio_bytes = await f.read()
-
     async with aiohttp.ClientSession() as session:
         data = aiohttp.FormData()
         data.add_field("upload_file", audio_bytes,
@@ -64,59 +96,16 @@ async def recognize_audio_shazam(file_path: str) -> dict | None:
                 return None
             return {
                 "title": track.get("title", "Noma'lum"),
-                "artist": track.get("subtitle", "Noma'lum artist"),
+                "artist": track.get("subtitle", "Noma'lum"),
             }
 
 
-async def download_and_send_preview(update: Update,
-                                    preview_url: str,
-                                    title: str,
-                                    artist: str):
-    """30 soniyalik preview mp3 ni yuklab foydalanuvchiga yuboradi."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(preview_url) as resp:
-            if resp.status != 200:
-                return False
-            audio_data = await resp.read()
-
-    tmp_path = Path(f"/tmp/{title[:30]}.mp3")
-    async with aiofiles.open(tmp_path, "wb") as f:
-        await f.write(audio_data)
-
-    with open(tmp_path, "rb") as audio_file:
-        await update.message.reply_audio(
-            audio=audio_file,
-            title=title,
-            performer=artist,
-            caption=f"🎵 *{title}*\n👤 {artist}\n\n_(30 soniyalik namuna)_",
-            parse_mode="Markdown",
-        )
-    tmp_path.unlink(missing_ok=True)
-    return True
-
-
-# ─── Handlers ───────────────────────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🎶 *Musiqa Bot ga xush kelibsiz!*\n\n"
-        "Men sizga musiqa topishda yordam beraman:\n\n"
-        "📝 *Matn yuboring* — qo'shiq nomi yoki artist\n"
-        "🎤 *Ovozli xabar* — qo'shiq parchasi (Shazam aniqlaydi)\n"
-        "🎧 *Audio fayl* — musiqani aniqlash uchun\n\n"
-        "Bosing va musiqa qidiring! 🚀"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "ℹ️ *Yordam*\n\n"
-        "• Qo'shiq nomi yozing → men topaman\n"
-        "• Artist nomi yozing → eng mashhur qo'shiqlarini topaman\n"
-        "• Ovozli xabar yuboring → Shazam orqali aniqlayman\n"
-        "• Audio fayl yuboring → aniqlab, o'xshashlarini topaman\n\n"
-        "_Masalan: `Dua Lipa Levitating` deb yozing_"
+        "🎵 *Musiqa Bot ga xush kelibsiz!*\n\n"
+        "Qo'shiq nomi yoki artist yozing — men YouTube dan topib yuboraman!\n\n"
+        "🎤 Ovozli xabar yuborsangiz ham aniqlayman!\n\n"
+        "_Masalan: `Dua Lipa Levitating`_"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -126,54 +115,54 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
 
-    msg = await update.message.reply_text(f"🔍 *{query}* qidirilmoqda...",
-                                          parse_mode="Markdown")
+    msg = await update.message.reply_text(
+        f"🔍 *{query}* qidirilmoqda...\n⏳ Biroz kuting (10-20 sek)",
+        parse_mode="Markdown"
+    )
 
-    results = await search_music_by_text(query)
-    if not results:
-        await msg.edit_text("❌ Hech narsa topilmadi. Boshqa so'z bilan urinib ko'ring.")
-        return
+    results = await search_music_deezer(query)
+    await msg.edit_text("⬇️ YouTube dan yuklanmoqda...")
+    file_path, title, artist = await download_from_youtube(query)
 
-    await msg.edit_text(f"✅ *{len(results)} ta natija topildi!*", parse_mode="Markdown")
+    if file_path and Path(file_path).exists():
+        cover = results[0]["cover"] if results else None
+        deezer_url = results[0]["deezer_url"] if results else ""
 
-    for track in results:
-        title = track["title"]
-        artist = track["artist"]
-        preview = track.get("preview_url")
-        cover = track.get("cover")
-        deezer = track.get("deezer_url", "")
-
-        caption = f"🎵 *{title}*\n👤 _{artist}_"
         buttons = []
-        if deezer:
-            buttons.append([InlineKeyboardButton("🎧 Deezer'da tinglash", url=deezer)])
-
+        if deezer_url:
+            buttons.append([InlineKeyboardButton("🎧 Deezer'da tinglash", url=deezer_url)])
         keyboard = InlineKeyboardMarkup(buttons) if buttons else None
 
-        # Muqova rasmi bilan yuborish
         if cover:
             await update.message.reply_photo(
                 photo=cover,
-                caption=caption,
+                caption=f"🎵 *{title}*\n👤 _{artist}_",
                 parse_mode="Markdown",
-                reply_markup=keyboard,
+                reply_markup=keyboard
             )
-        else:
-            await update.message.reply_text(caption, parse_mode="Markdown",
-                                            reply_markup=keyboard)
 
-        # 30 soniyalik preview audio
-        if preview:
-            await download_and_send_preview(update, preview, title, artist)
+        with open(file_path, "rb") as audio_file:
+            await update.message.reply_audio(
+                audio=audio_file,
+                title=title,
+                performer=artist,
+                caption=f"🎵 *{title}*\n👤 _{artist}_",
+                parse_mode="Markdown",
+            )
 
-        await asyncio.sleep(0.5)
+        await msg.delete()
+        Path(file_path).unlink(missing_ok=True)
+    else:
+        await msg.edit_text(
+            "❌ Yuklab bo'lmadi. Boshqa so'z bilan urinib ko'ring.\n"
+            "_Masalan: `artist - qo'shiq nomi`_",
+            parse_mode="Markdown"
+        )
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Audio fayl yoki ovozli xabar."""
-    msg = await update.message.reply_text("🎧 Audio tahlil qilinmoqda...")
+    msg = await update.message.reply_text("🎧 Aniqlanmoqda...")
 
-    # Faylni yuklab olish
     if update.message.voice:
         file_obj = update.message.voice
         ext = "ogg"
@@ -188,66 +177,48 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_file = await context.bot.get_file(file_obj.file_id)
     await tg_file.download_to_drive(tmp_path)
 
+    track_info = None
     if RAPIDAPI_KEY:
         await msg.edit_text("🔎 Shazam orqali aniqlanmoqda...")
         track_info = await recognize_audio_shazam(tmp_path)
-    else:
-        track_info = None
 
-    # Faylni o'chirish
     Path(tmp_path).unlink(missing_ok=True)
 
     if track_info:
         title = track_info["title"]
         artist = track_info["artist"]
         await msg.edit_text(
-            f"✅ *Topildi!*\n\n🎵 *{title}*\n👤 _{artist}_\n\n"
-            "🔍 Endi Deezer'dan qidirilyapti...",
+            f"✅ Topildi!\n🎵 *{title}*\n👤 _{artist}_\n\n⬇️ Yuklanmoqda...",
             parse_mode="Markdown"
         )
-        results = await search_music_by_text(f"{artist} {title}")
-        if results:
-            track = results[0]
-            preview = track.get("preview_url")
-            cover = track.get("cover")
-            deezer = track.get("deezer_url", "")
-            buttons = []
-            if deezer:
-                buttons.append([InlineKeyboardButton("🎧 Deezer'da tinglash", url=deezer)])
-            keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-            caption = f"🎵 *{track['title']}*\n👤 _{track['artist']}_"
-            if cover:
-                await update.message.reply_photo(photo=cover, caption=caption,
-                                                  parse_mode="Markdown",
-                                                  reply_markup=keyboard)
-            if preview:
-                await download_and_send_preview(update, preview,
-                                                track["title"], track["artist"])
+        file_path, dl_title, dl_artist = await download_from_youtube(f"{artist} {title}")
+        if file_path and Path(file_path).exists():
+            with open(file_path, "rb") as audio_file:
+                await update.message.reply_audio(
+                    audio=audio_file,
+                    title=title,
+                    performer=artist,
+                )
+            await msg.delete()
+            Path(file_path).unlink(missing_ok=True)
         else:
-            await update.message.reply_text(
-                f"ℹ️ Deezer'da '{title}' topilmadi, lekin qo'shiq aniqlanadi:\n"
-                f"🎵 *{title}* — _{artist}_",
+            await msg.edit_text(
+                f"✅ Aniqlandi: *{title}* — _{artist}_\n❌ Lekin yuklab bo'lmadi.",
                 parse_mode="Markdown"
             )
     else:
-        # Shazam yo'q yoki aniqlay olmadi — matn izlash taklif qilish
         await msg.edit_text(
-            "⚠️ Audio aniqlanmadi.\n\n"
-            "Qo'shiq nomini *matn* ko'rinishida yuboring, men topaman! 🎵",
+            "⚠️ Aniqlanmadi.\n\nQo'shiq nomini *matn* ko'rinishida yuboring!",
             parse_mode="Markdown"
         )
 
-
-# ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN .env faylida yo'q!")
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
 
